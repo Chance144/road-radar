@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Road Radar • Pi Zero Speed Monitor</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <style>
+    body { font-family: system-ui, -apple-system, sans-serif; }
+    .stat-card { transition: transform 0.1s ease; }
+    .stat-card:hover { transform: translateY(-1px); }
+  </style>
+</head>
+<body class="bg-zinc-950 text-zinc-200">
+  <div class="max-w-6xl mx-auto px-6 py-8">
+    <!-- Header -->
+    <div class="flex items-center justify-between mb-8">
+      <div>
+        <h1 class="text-3xl font-semibold tracking-tight">Road Radar</h1>
+        <p class="text-zinc-400 text-sm mt-1">Pi Zero speed monitor • July 14, 2026</p>
+      </div>
+      <div class="text-right text-sm">
+        <div class="text-emerald-400">319 events</div>
+        <div class="text-zinc-500">14h 12m recording</div>
+      </div>
+    </div>
+
+    <!-- Stats -->
+    <div id="stats" class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8"></div>
+
+    <!-- Main Chart -->
+    <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-6 mb-8">
+      <div class="flex items-center justify-between mb-4">
+        <div>
+          <div class="font-medium">Speed over time</div>
+          <div class="text-xs text-zinc-500">All events • 20° angle correction applied</div>
+        </div>
+      </div>
+      <div class="h-80">
+        <canvas id="speedChart"></canvas>
+      </div>
+    </div>
+
+    <div class="grid md:grid-cols-2 gap-8">
+      <!-- Direction -->
+      <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-6">
+        <div class="font-medium mb-4">Direction</div>
+        <div class="h-64">
+          <canvas id="directionChart"></canvas>
+        </div>
+      </div>
+
+      <!-- Recent Events -->
+      <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-6">
+        <div class="font-medium mb-4">Recent events</div>
+        <div id="recent-table" class="text-sm"></div>
+      </div>
+    </div>
+
+    <div class="mt-8 text-xs text-zinc-500 text-center">
+      Data from OmniPreSense OPS243-C-FC-RP • Pi Zero 2
+    </div>
+  </div>
+
+  <script>
+    let data = [];
+
+    async function loadData() {
+      const res = await fetch('radar_yesterday.json');
+      data = await res.json();
+      renderStats();
+      renderSpeedChart();
+      renderDirectionChart();
+      renderRecentTable();
+    }
+
+    function renderStats() {
+      const speeds = data.map(d => d.speed_mph);
+      const max = Math.max(...speeds);
+      const avg = speeds.reduce((a, b) => a + b, 0) / speeds.length;
+      const inbound = data.filter(d => d.direction === 'inbound_or_toward').length;
+      const outbound = data.length - inbound;
+
+      const statsEl = document.getElementById('stats');
+      statsEl.innerHTML = `
+        <div class="stat-card bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
+          <div class="text-xs text-zinc-500">Total events</div>
+          <div class="text-3xl font-semibold mt-1">${data.length}</div>
+        </div>
+        <div class="stat-card bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
+          <div class="text-xs text-zinc-500">Max speed</div>
+          <div class="text-3xl font-semibold mt-1">${max.toFixed(1)} <span class="text-base font-normal text-zinc-400">mph</span></div>
+        </div>
+        <div class="stat-card bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
+          <div class="text-xs text-zinc-500">Average speed</div>
+          <div class="text-3xl font-semibold mt-1">${avg.toFixed(1)} <span class="text-base font-normal text-zinc-400">mph</span></div>
+        </div>
+        <div class="stat-card bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
+          <div class="text-xs text-zinc-500">Inbound / Outbound</div>
+          <div class="text-3xl font-semibold mt-1">${inbound} <span class="text-base font-normal text-zinc-400">/ ${outbound}</span></div>
+        </div>
+      `;
+    }
+
+    function renderSpeedChart() {
+      const ctx = document.getElementById('speedChart');
+      const sorted = [...data].sort((a, b) => new Date(a.observed_at) - new Date(b.observed_at));
+      
+      new Chart(ctx, {
+        type: 'line',
+        data: {
+          labels: sorted.map(d => new Date(d.observed_at).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})),
+          datasets: [{
+            label: 'Speed (mph)',
+            data: sorted.map(d => d.speed_mph),
+            borderColor: '#22c55e',
+            borderWidth: 1.5,
+            fill: false,
+            tension: 0.1,
+            pointRadius: 0,
+            pointHoverRadius: 3
+          }]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          scales: {
+            x: { grid: { color: '#27251f' }, ticks: { color: '#666' } },
+            y: { grid: { color: '#27251f' }, ticks: { color: '#666' }, beginAtZero: true }
+          },
+          plugins: { legend: { display: false } }
+        }
+      });
+    }
+
+    function renderDirectionChart() {
+      const ctx = document.getElementById('directionChart');
+      const inbound = data.filter(d => d.direction === 'inbound_or_toward').length;
+      const outbound = data.length - inbound;
+
+      new Chart(ctx, {
+        type: 'doughnut',
+        data: {
+          labels: ['Inbound (toward)', 'Outbound (away)'],
+          datasets: [{
+            data: [inbound, outbound],
+            backgroundColor: ['#3b82f6', '#eab308']
+          }]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: { legend: { position: 'bottom', labels: { color: '#999' } } }
+        }
+      });
+    }
+
+    function renderRecentTable() {
+      const recent = [...data].sort((a, b) => new Date(b.observed_at) - new Date(a.observed_at)).slice(0, 12);
+      const html = recent.map(d => `
+        <div class="flex justify-between py-1.5 border-b border-zinc-800 last:border-0 text-xs">
+          <div class="text-zinc-400">${new Date(d.observed_at).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit', second:'2-digit'})}</div>
+          <div class="font-mono">${d.speed_mph.toFixed(1)} mph</div>
+          <div class="${d.direction === 'inbound_or_toward' ? 'text-blue-400' : 'text-yellow-400'}">${d.direction === 'inbound_or_toward' ? 'inbound' : 'outbound'}</div>
+        </div>
+      `).join('');
+      document.getElementById('recent-table').innerHTML = html;
+    }
+
+    loadData();
+  </script>
+</body>
+</html>
