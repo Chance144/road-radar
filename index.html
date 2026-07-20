@@ -3,26 +3,48 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Road Radar • Speed Distribution</title>
+  <title>Road Radar • Live Inbound</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
   <style>
     body { font-family: system-ui, -apple-system, sans-serif; }
     .stat-card { transition: transform 0.1s ease; }
     .stat-card:hover { transform: translateY(-1px); }
+    .pulse { animation: pulse 2s infinite; }
+    @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }
   </style>
 </head>
 <body class="bg-zinc-950 text-zinc-200">
   <div class="max-w-6xl mx-auto px-6 py-8">
     <!-- Header -->
-    <div class="flex items-center justify-between mb-8">
+    <div class="flex items-center justify-between mb-6">
       <div>
         <h1 class="text-3xl font-semibold tracking-tight">Road Radar</h1>
-        <p class="text-zinc-400 text-sm mt-1" id="subtitle">Pi Zero speed monitor</p>
+        <p class="text-zinc-400 text-sm mt-1">Inbound traffic (uphill) • <span id="mode-label">connecting...</span></p>
       </div>
       <div class="text-right text-sm">
-        <div class="text-emerald-400" id="event-count">-</div>
-        <div class="text-zinc-500" id="date-range">-</div>
+        <div class="flex items-center justify-end gap-2">
+          <span id="live-dot" class="inline-block w-2.5 h-2.5 rounded-full bg-zinc-600"></span>
+          <span id="live-label" class="text-zinc-500">offline</span>
+        </div>
+        <div class="text-zinc-500 mt-1" id="last-refresh">-</div>
+      </div>
+    </div>
+
+    <!-- Latest Speed Panel -->
+    <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-8 mb-8 flex items-center justify-between">
+      <div>
+        <div class="text-xs text-zinc-500 mb-1">Latest vehicle</div>
+        <div class="flex items-baseline gap-3">
+          <span id="latest-speed" class="text-7xl font-bold tracking-tight">--</span>
+          <span class="text-2xl text-zinc-400">mph</span>
+        </div>
+        <div id="latest-meta" class="text-sm text-zinc-500 mt-2">waiting for traffic</div>
+      </div>
+      <div class="text-right">
+        <div class="text-xs text-zinc-500 mb-1">Speed limit</div>
+        <div class="text-4xl font-semibold text-zinc-400">30</div>
+        <div id="latest-delta" class="text-sm mt-2"></div>
       </div>
     </div>
 
@@ -37,7 +59,7 @@
           <div class="text-xs text-zinc-500">2 mph bins • green under 30 • amber 30-35 • red over 35</div>
         </div>
       </div>
-      <div class="h-80">
+      <div class="h-72">
         <canvas id="histChart"></canvas>
       </div>
     </div>
@@ -45,8 +67,8 @@
     <!-- Percentile Strip -->
     <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-6 mb-8">
       <div class="font-medium mb-1">Percentiles</div>
-      <div class="text-xs text-zinc-500 mb-5">Where drivers actually fall on the speed range</div>
-      <div class="relative h-10 rounded-lg overflow-visible" id="pct-strip">
+      <div class="text-xs text-zinc-500 mb-5">Where inbound drivers actually fall on the speed range</div>
+      <div class="relative h-10 rounded-lg overflow-visible">
         <div class="absolute inset-0 rounded-lg" style="background: linear-gradient(90deg, #059669 0%, #059669 55%, #d97706 70%, #dc2626 100%);"></div>
         <div id="pct-markers"></div>
       </div>
@@ -57,41 +79,63 @@
       </div>
     </div>
 
-    <div class="grid md:grid-cols-2 gap-8">
-      <!-- Direction -->
-      <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-6">
-        <div class="font-medium mb-4">Direction split</div>
-        <div class="h-64">
-          <canvas id="directionChart"></canvas>
-        </div>
-      </div>
-
-      <!-- Recent Events -->
-      <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-6">
-        <div class="font-medium mb-4">Latest events</div>
-        <div id="recent-table" class="text-sm"></div>
-      </div>
+    <!-- Recent Events -->
+    <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-6">
+      <div class="font-medium mb-4">Latest inbound events</div>
+      <div id="recent-table" class="text-sm"></div>
     </div>
 
     <div class="mt-8 text-xs text-zinc-500 text-center">
-      Data from OmniPreSense OPS243-C-FC-RP • Pi Zero 2 • 11° cosine correction
+      OmniPreSense OPS243-C-FC-RP • Pi Zero 2 • 9° cosine correction • inbound only
     </div>
   </div>
 
   <script>
     const SPEED_LIMIT = 30;
     const ALERT_THRESHOLD = 35;
+    const POLL_MS = 5000;
     let data = [];
+    let histChart = null;
+    let liveMode = false;
 
-    async function loadData() {
-      const res = await fetch('radar_data.json');
-      data = await res.json();
-      renderHeader();
-      renderStats();
-      renderHistogram();
-      renderPercentileStrip();
-      renderDirectionChart();
-      renderRecentTable();
+    async function fetchEvents() {
+      // Live mode: same-origin API (served by the Pi Zero).
+      // Static mode: radar_data.json next to this page (GitHub Pages).
+      try {
+        const res = await fetch('/api/events', { cache: 'no-store' });
+        if (res.ok) {
+          liveMode = true;
+          return await res.json();
+        }
+      } catch (e) { /* fall through to static */ }
+      liveMode = false;
+      const res = await fetch('radar_data.json', { cache: 'no-store' });
+      const all = await res.json();
+      return all.filter(e => e.direction === 'inbound_or_toward');
+    }
+
+    async function refresh() {
+      try {
+        data = await fetchEvents();
+        renderAll();
+        const now = new Date();
+        document.getElementById('last-refresh').textContent =
+          'updated ' + now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+        document.getElementById('mode-label').textContent = liveMode ? 'live feed' : 'periodic export';
+        const dot = document.getElementById('live-dot');
+        const label = document.getElementById('live-label');
+        if (liveMode) {
+          dot.className = 'inline-block w-2.5 h-2.5 rounded-full bg-emerald-400 pulse';
+          label.className = 'text-emerald-400';
+          label.textContent = 'LIVE';
+        } else {
+          dot.className = 'inline-block w-2.5 h-2.5 rounded-full bg-amber-400';
+          label.className = 'text-amber-400';
+          label.textContent = 'static';
+        }
+      } catch (e) {
+        document.getElementById('live-label').textContent = 'error';
+      }
     }
 
     function percentile(sorted, p) {
@@ -106,18 +150,36 @@
       return data.map(d => d.speed_mph).sort((a, b) => a - b);
     }
 
-    function renderHeader() {
-      document.getElementById('event-count').textContent = data.length + ' events';
-      const times = data.map(d => new Date(d.observed_at)).sort((a, b) => a - b);
-      if (times.length) {
-        const opts = { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' };
-        document.getElementById('date-range').textContent =
-          times[0].toLocaleString([], opts) + ' to ' + times[times.length - 1].toLocaleString([], opts);
-      }
+    function renderAll() {
+      renderLatest();
+      renderStats();
+      renderHistogram();
+      renderPercentileStrip();
+      renderRecentTable();
+    }
+
+    function renderLatest() {
+      if (!data.length) return;
+      const latest = data[data.length - 1];
+      const speed = latest.speed_mph;
+      const el = document.getElementById('latest-speed');
+      el.textContent = speed.toFixed(1);
+      el.className = 'text-7xl font-bold tracking-tight ' +
+        (speed > ALERT_THRESHOLD ? 'text-red-400' : speed > SPEED_LIMIT ? 'text-amber-400' : 'text-emerald-400');
+      const t = new Date(latest.observed_at);
+      const agoSec = Math.round((Date.now() - t.getTime()) / 1000);
+      const ago = agoSec < 90 ? agoSec + 's ago' : Math.round(agoSec / 60) + 'm ago';
+      document.getElementById('latest-meta').textContent =
+        t.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) + ' (' + ago + ')';
+      const delta = speed - SPEED_LIMIT;
+      const deltaEl = document.getElementById('latest-delta');
+      deltaEl.textContent = (delta >= 0 ? '+' : '') + delta.toFixed(1) + ' vs limit';
+      deltaEl.className = 'text-sm mt-2 ' + (delta > 0 ? 'text-amber-400' : 'text-emerald-400');
     }
 
     function renderStats() {
       const speeds = sortedSpeeds();
+      if (!speeds.length) return;
       const n = speeds.length;
       const mean = speeds.reduce((a, b) => a + b, 0) / n;
       const p50 = percentile(speeds, 50);
@@ -125,16 +187,14 @@
       const max = speeds[n - 1];
       const overLimit = speeds.filter(s => s > SPEED_LIMIT).length;
       const pctOver = (100 * overLimit / n).toFixed(0);
-
       const cards = [
-        ['Total events', n, ''],
+        ['Inbound events', n, ''],
         ['85th percentile', p85.toFixed(1), 'mph'],
         ['Average', mean.toFixed(1), 'mph'],
         ['Median', p50.toFixed(1), 'mph'],
         ['Max', max.toFixed(1), 'mph'],
         ['Over ' + SPEED_LIMIT + ' mph', pctOver + '%', overLimit + ' of ' + n],
       ];
-
       document.getElementById('stats').innerHTML = cards.map(([label, val, sub]) => `
         <div class="stat-card bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
           <div class="text-xs text-zinc-500">${label}</div>
@@ -149,9 +209,7 @@
       const lo = Math.floor(speeds[0] / BIN) * BIN;
       const hi = Math.ceil(speeds[speeds.length - 1] / BIN) * BIN;
       const bins = [];
-      for (let start = lo; start < hi; start += BIN) {
-        bins.push({ start, end: start + BIN, count: 0 });
-      }
+      for (let start = lo; start < hi; start += BIN) bins.push({ start, end: start + BIN, count: 0 });
       for (const s of speeds) {
         const i = Math.min(Math.floor((s - lo) / BIN), bins.length - 1);
         bins[i].count++;
@@ -166,10 +224,11 @@
     }
 
     function renderHistogram() {
+      const speeds = sortedSpeeds();
+      if (!speeds.length) return;
       const bins = buildBins();
       const lo = bins[0].start;
       const hi = bins[bins.length - 1].end;
-      const speeds = sortedSpeeds();
       const p85 = percentile(speeds, 85);
 
       const markers = {
@@ -199,7 +258,8 @@
         }
       };
 
-      new Chart(document.getElementById('histChart'), {
+      if (histChart) histChart.destroy();
+      histChart = new Chart(document.getElementById('histChart'), {
         type: 'bar',
         data: {
           labels: bins.map(b => b.start + '-' + b.end),
@@ -213,18 +273,10 @@
           responsive: true,
           maintainAspectRatio: false,
           layout: { padding: { top: 20 } },
+          animation: false,
           scales: {
-            x: {
-              grid: { display: false },
-              ticks: { color: '#666' },
-              title: { display: true, text: 'mph', color: '#666' }
-            },
-            y: {
-              grid: { color: '#27251f' },
-              ticks: { color: '#666', stepSize: 1 },
-              beginAtZero: true,
-              title: { display: true, text: 'vehicles', color: '#666' }
-            }
+            x: { grid: { display: false }, ticks: { color: '#666' }, title: { display: true, text: 'mph', color: '#666' } },
+            y: { grid: { color: '#27251f' }, ticks: { color: '#666', stepSize: 1 }, beginAtZero: true, title: { display: true, text: 'vehicles', color: '#666' } }
           },
           plugins: { legend: { display: false } }
         },
@@ -234,46 +286,24 @@
 
     function renderPercentileStrip() {
       const speeds = sortedSpeeds();
+      if (!speeds.length) return;
       const min = Math.floor(speeds[0]);
       const max = Math.ceil(speeds[speeds.length - 1]);
       const marks = [
         ['p50', percentile(speeds, 50), '#e5e5e5'],
         ['p85', percentile(speeds, 85), '#60a5fa'],
         ['p95', percentile(speeds, 95), '#c084fc'],
-        ['limit', SPEED_LIMIT, '#f87171'],
       ];
       document.getElementById('pct-markers').innerHTML = marks.map(([label, v, color]) => {
         const left = (100 * (v - min) / (max - min)).toFixed(1);
         return `
           <div class="absolute top-0 h-full" style="left: ${left}%;">
             <div class="w-0.5 h-full" style="background: ${color};"></div>
-            <div class="absolute -top-6 -translate-x-1/2 text-xs font-medium whitespace-nowrap" style="color: ${color};">
-              ${label === 'limit' ? '' : label + ' '}${label === 'limit' ? '' : v.toFixed(1)}
-            </div>
+            <div class="absolute -top-6 -translate-x-1/2 text-xs font-medium whitespace-nowrap" style="color: ${color};">${label} ${v.toFixed(1)}</div>
           </div>`;
       }).join('');
       document.getElementById('pct-min').textContent = min + ' mph';
       document.getElementById('pct-max').textContent = max + ' mph';
-    }
-
-    function renderDirectionChart() {
-      const inbound = data.filter(d => d.direction === 'inbound_or_toward').length;
-      const outbound = data.length - inbound;
-      new Chart(document.getElementById('directionChart'), {
-        type: 'doughnut',
-        data: {
-          labels: ['Inbound (toward)', 'Outbound (away)'],
-          datasets: [{
-            data: [inbound, outbound],
-            backgroundColor: ['#3b82f6', '#eab308']
-          }]
-        },
-        options: {
-          responsive: true,
-          maintainAspectRatio: false,
-          plugins: { legend: { position: 'bottom', labels: { color: '#999' } } }
-        }
-      });
     }
 
     function renderRecentTable() {
@@ -281,13 +311,13 @@
       document.getElementById('recent-table').innerHTML = recent.map(d => `
         <div class="flex justify-between py-1.5 border-b border-zinc-800 last:border-0 text-xs">
           <div class="text-zinc-400">${new Date(d.observed_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</div>
-          <div class="font-mono ${d.speed_mph > SPEED_LIMIT ? 'text-amber-400' : ''} ${d.speed_mph > ALERT_THRESHOLD ? 'text-red-400 font-semibold' : ''}">${d.speed_mph.toFixed(1)} mph</div>
-          <div class="${d.direction === 'inbound_or_toward' ? 'text-blue-400' : 'text-yellow-400'}">${d.direction === 'inbound_or_toward' ? 'inbound' : 'outbound'}</div>
+          <div class="font-mono ${d.speed_mph > ALERT_THRESHOLD ? 'text-red-400 font-semibold' : d.speed_mph > SPEED_LIMIT ? 'text-amber-400' : ''}">${d.speed_mph.toFixed(1)} mph</div>
         </div>
-      `).join('');
+      `).join('') || '<div class="text-zinc-500 text-xs">no inbound events yet</div>';
     }
 
-    loadData();
+    refresh();
+    setInterval(refresh, POLL_MS);
   </script>
 </body>
 </html>
