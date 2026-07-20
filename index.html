@@ -38,7 +38,7 @@
     <!-- Filter Bar -->
     <div class="flex items-center gap-3 mb-6 text-sm">
       <span class="text-zinc-500">Location:</span>
-      <select id="location-filter" onchange="renderAll()">
+      <select id="location-filter" onchange="userTouchedFilter = true; renderAll()">
         <option value="">All locations</option>
       </select>
       <span id="filter-count" class="text-zinc-500 text-xs"></span>
@@ -107,7 +107,7 @@
   </div>
 
   <script>
-    const SPEED_LIMIT = 30;
+    let SPEED_LIMIT = 30;
     const ALERT_THRESHOLD = 35;
     const POLL_MS = 5000;
     const LOCATION_MAP = {
@@ -118,6 +118,8 @@
     let data = [];
     let histChart = null;
     let liveMode = false;
+    let currentSsid = null;
+    let userTouchedFilter = false;
 
     function locationLabel(ssid) {
       if (!ssid) return 'Unknown';
@@ -152,6 +154,8 @@
       try {
         const [events, status] = await Promise.all([fetchEvents(), fetchStatus()]);
         data = events;
+        currentSsid = (status && status.ssid) ? status.ssid : null;
+        if (status && status.speed_limit) SPEED_LIMIT = status.speed_limit;
         buildLocationFilter();
         renderAll();
         const badge = document.getElementById('location-badge');
@@ -182,14 +186,17 @@
 
     function buildLocationFilter() {
       const sel = document.getElementById('location-filter');
-      const current = sel.value;
-      const networks = [...new Set(data.map(e => e.network || 'NETGEAR78'))].sort();
+      const networks = [...new Set(data.map(e => e.network || 'NETGEAR78'))];
+      if (currentSsid && !networks.includes(currentSsid)) networks.push(currentSsid);
+      networks.sort();
       const opts = ['<option value="">All locations</option>']
         .concat(networks.map(n => `<option value="${n}">${locationLabel(n)}</option>`));
       const html = opts.join('');
-      if (sel.innerHTML !== html) {
-        sel.innerHTML = html;
-        sel.value = current;
+      if (sel.innerHTML !== html) sel.innerHTML = html;
+      // Default view follows the Pi's current location until the user picks a filter manually.
+      if (!userTouchedFilter) {
+        sel.value = currentSsid || '';
+        if (sel.value !== (currentSsid || '')) sel.value = '';
       }
     }
 
