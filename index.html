@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Road Radar • Pi Zero Speed Monitor</title>
+  <title>Road Radar • Speed Distribution</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
   <style>
@@ -18,34 +18,49 @@
     <div class="flex items-center justify-between mb-8">
       <div>
         <h1 class="text-3xl font-semibold tracking-tight">Road Radar</h1>
-        <p class="text-zinc-400 text-sm mt-1">Pi Zero speed monitor • July 14, 2026</p>
+        <p class="text-zinc-400 text-sm mt-1" id="subtitle">Pi Zero speed monitor</p>
       </div>
       <div class="text-right text-sm">
-        <div class="text-emerald-400">319 events</div>
-        <div class="text-zinc-500">14h 12m recording</div>
+        <div class="text-emerald-400" id="event-count">-</div>
+        <div class="text-zinc-500" id="date-range">-</div>
       </div>
     </div>
 
     <!-- Stats -->
-    <div id="stats" class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8"></div>
+    <div id="stats" class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4 mb-8"></div>
 
-    <!-- Main Chart -->
+    <!-- Speed Distribution Histogram -->
     <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-6 mb-8">
       <div class="flex items-center justify-between mb-4">
         <div>
-          <div class="font-medium">Speed over time</div>
-          <div class="text-xs text-zinc-500">All events • 20° angle correction applied</div>
+          <div class="font-medium">Speed distribution</div>
+          <div class="text-xs text-zinc-500">2 mph bins • green under 30 • amber 30-35 • red over 35</div>
         </div>
       </div>
       <div class="h-80">
-        <canvas id="speedChart"></canvas>
+        <canvas id="histChart"></canvas>
+      </div>
+    </div>
+
+    <!-- Percentile Strip -->
+    <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-6 mb-8">
+      <div class="font-medium mb-1">Percentiles</div>
+      <div class="text-xs text-zinc-500 mb-5">Where drivers actually fall on the speed range</div>
+      <div class="relative h-10 rounded-lg overflow-visible" id="pct-strip">
+        <div class="absolute inset-0 rounded-lg" style="background: linear-gradient(90deg, #059669 0%, #059669 55%, #d97706 70%, #dc2626 100%);"></div>
+        <div id="pct-markers"></div>
+      </div>
+      <div class="flex justify-between text-xs text-zinc-500 mt-2">
+        <span id="pct-min">-</span>
+        <span>speed limit 30 mph</span>
+        <span id="pct-max">-</span>
       </div>
     </div>
 
     <div class="grid md:grid-cols-2 gap-8">
       <!-- Direction -->
       <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-6">
-        <div class="font-medium mb-4">Direction</div>
+        <div class="font-medium mb-4">Direction split</div>
         <div class="h-64">
           <canvas id="directionChart"></canvas>
         </div>
@@ -53,93 +68,198 @@
 
       <!-- Recent Events -->
       <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-6">
-        <div class="font-medium mb-4">Recent events</div>
+        <div class="font-medium mb-4">Latest events</div>
         <div id="recent-table" class="text-sm"></div>
       </div>
     </div>
 
     <div class="mt-8 text-xs text-zinc-500 text-center">
-      Data from OmniPreSense OPS243-C-FC-RP • Pi Zero 2
+      Data from OmniPreSense OPS243-C-FC-RP • Pi Zero 2 • 11° cosine correction
     </div>
   </div>
 
   <script>
+    const SPEED_LIMIT = 30;
+    const ALERT_THRESHOLD = 35;
     let data = [];
 
     async function loadData() {
-      const res = await fetch('radar_yesterday.json');
+      const res = await fetch('radar_data.json');
       data = await res.json();
+      renderHeader();
       renderStats();
-      renderSpeedChart();
+      renderHistogram();
+      renderPercentileStrip();
       renderDirectionChart();
       renderRecentTable();
     }
 
-    function renderStats() {
-      const speeds = data.map(d => d.speed_mph);
-      const max = Math.max(...speeds);
-      const avg = speeds.reduce((a, b) => a + b, 0) / speeds.length;
-      const inbound = data.filter(d => d.direction === 'inbound_or_toward').length;
-      const outbound = data.length - inbound;
-
-      const statsEl = document.getElementById('stats');
-      statsEl.innerHTML = `
-        <div class="stat-card bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
-          <div class="text-xs text-zinc-500">Total events</div>
-          <div class="text-3xl font-semibold mt-1">${data.length}</div>
-        </div>
-        <div class="stat-card bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
-          <div class="text-xs text-zinc-500">Max speed</div>
-          <div class="text-3xl font-semibold mt-1">${max.toFixed(1)} <span class="text-base font-normal text-zinc-400">mph</span></div>
-        </div>
-        <div class="stat-card bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
-          <div class="text-xs text-zinc-500">Average speed</div>
-          <div class="text-3xl font-semibold mt-1">${avg.toFixed(1)} <span class="text-base font-normal text-zinc-400">mph</span></div>
-        </div>
-        <div class="stat-card bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
-          <div class="text-xs text-zinc-500">Inbound / Outbound</div>
-          <div class="text-3xl font-semibold mt-1">${inbound} <span class="text-base font-normal text-zinc-400">/ ${outbound}</span></div>
-        </div>
-      `;
+    function percentile(sorted, p) {
+      if (!sorted.length) return 0;
+      const r = (p / 100) * (sorted.length - 1);
+      const lo = Math.floor(r);
+      const hi = Math.min(lo + 1, sorted.length - 1);
+      return sorted[lo] + (sorted[hi] - sorted[lo]) * (r - lo);
     }
 
-    function renderSpeedChart() {
-      const ctx = document.getElementById('speedChart');
-      const sorted = [...data].sort((a, b) => new Date(a.observed_at) - new Date(b.observed_at));
-      
-      new Chart(ctx, {
-        type: 'line',
+    function sortedSpeeds() {
+      return data.map(d => d.speed_mph).sort((a, b) => a - b);
+    }
+
+    function renderHeader() {
+      document.getElementById('event-count').textContent = data.length + ' events';
+      const times = data.map(d => new Date(d.observed_at)).sort((a, b) => a - b);
+      if (times.length) {
+        const opts = { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' };
+        document.getElementById('date-range').textContent =
+          times[0].toLocaleString([], opts) + ' to ' + times[times.length - 1].toLocaleString([], opts);
+      }
+    }
+
+    function renderStats() {
+      const speeds = sortedSpeeds();
+      const n = speeds.length;
+      const mean = speeds.reduce((a, b) => a + b, 0) / n;
+      const p50 = percentile(speeds, 50);
+      const p85 = percentile(speeds, 85);
+      const max = speeds[n - 1];
+      const overLimit = speeds.filter(s => s > SPEED_LIMIT).length;
+      const pctOver = (100 * overLimit / n).toFixed(0);
+
+      const cards = [
+        ['Total events', n, ''],
+        ['85th percentile', p85.toFixed(1), 'mph'],
+        ['Average', mean.toFixed(1), 'mph'],
+        ['Median', p50.toFixed(1), 'mph'],
+        ['Max', max.toFixed(1), 'mph'],
+        ['Over ' + SPEED_LIMIT + ' mph', pctOver + '%', overLimit + ' of ' + n],
+      ];
+
+      document.getElementById('stats').innerHTML = cards.map(([label, val, sub]) => `
+        <div class="stat-card bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
+          <div class="text-xs text-zinc-500">${label}</div>
+          <div class="text-2xl font-semibold mt-1">${val} <span class="text-sm font-normal text-zinc-400">${sub}</span></div>
+        </div>
+      `).join('');
+    }
+
+    function buildBins() {
+      const speeds = sortedSpeeds();
+      const BIN = 2;
+      const lo = Math.floor(speeds[0] / BIN) * BIN;
+      const hi = Math.ceil(speeds[speeds.length - 1] / BIN) * BIN;
+      const bins = [];
+      for (let start = lo; start < hi; start += BIN) {
+        bins.push({ start, end: start + BIN, count: 0 });
+      }
+      for (const s of speeds) {
+        const i = Math.min(Math.floor((s - lo) / BIN), bins.length - 1);
+        bins[i].count++;
+      }
+      return bins;
+    }
+
+    function binColor(start) {
+      if (start >= ALERT_THRESHOLD) return '#dc2626';
+      if (start >= SPEED_LIMIT) return '#d97706';
+      return '#059669';
+    }
+
+    function renderHistogram() {
+      const bins = buildBins();
+      const lo = bins[0].start;
+      const hi = bins[bins.length - 1].end;
+      const speeds = sortedSpeeds();
+      const p85 = percentile(speeds, 85);
+
+      const markers = {
+        id: 'markers',
+        afterDraw(chart) {
+          const { ctx, chartArea } = chart;
+          const xFor = v => chartArea.left + ((v - lo) / (hi - lo)) * (chartArea.right - chartArea.left);
+          const draw = (v, color, label) => {
+            const x = xFor(v);
+            ctx.save();
+            ctx.strokeStyle = color;
+            ctx.setLineDash([5, 4]);
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            ctx.moveTo(x, chartArea.top);
+            ctx.lineTo(x, chartArea.bottom);
+            ctx.stroke();
+            ctx.setLineDash([]);
+            ctx.fillStyle = color;
+            ctx.font = '11px system-ui';
+            ctx.textAlign = 'center';
+            ctx.fillText(label, x, chartArea.top - 6);
+            ctx.restore();
+          };
+          draw(SPEED_LIMIT, '#f87171', 'limit ' + SPEED_LIMIT);
+          draw(p85, '#60a5fa', 'p85 ' + p85.toFixed(1));
+        }
+      };
+
+      new Chart(document.getElementById('histChart'), {
+        type: 'bar',
         data: {
-          labels: sorted.map(d => new Date(d.observed_at).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})),
+          labels: bins.map(b => b.start + '-' + b.end),
           datasets: [{
-            label: 'Speed (mph)',
-            data: sorted.map(d => d.speed_mph),
-            borderColor: '#22c55e',
-            borderWidth: 1.5,
-            fill: false,
-            tension: 0.1,
-            pointRadius: 0,
-            pointHoverRadius: 3
+            data: bins.map(b => b.count),
+            backgroundColor: bins.map(b => binColor(b.start)),
+            borderRadius: 4,
           }]
         },
         options: {
           responsive: true,
           maintainAspectRatio: false,
+          layout: { padding: { top: 20 } },
           scales: {
-            x: { grid: { color: '#27251f' }, ticks: { color: '#666' } },
-            y: { grid: { color: '#27251f' }, ticks: { color: '#666' }, beginAtZero: true }
+            x: {
+              grid: { display: false },
+              ticks: { color: '#666' },
+              title: { display: true, text: 'mph', color: '#666' }
+            },
+            y: {
+              grid: { color: '#27251f' },
+              ticks: { color: '#666', stepSize: 1 },
+              beginAtZero: true,
+              title: { display: true, text: 'vehicles', color: '#666' }
+            }
           },
           plugins: { legend: { display: false } }
-        }
+        },
+        plugins: [markers]
       });
     }
 
+    function renderPercentileStrip() {
+      const speeds = sortedSpeeds();
+      const min = Math.floor(speeds[0]);
+      const max = Math.ceil(speeds[speeds.length - 1]);
+      const marks = [
+        ['p50', percentile(speeds, 50), '#e5e5e5'],
+        ['p85', percentile(speeds, 85), '#60a5fa'],
+        ['p95', percentile(speeds, 95), '#c084fc'],
+        ['limit', SPEED_LIMIT, '#f87171'],
+      ];
+      document.getElementById('pct-markers').innerHTML = marks.map(([label, v, color]) => {
+        const left = (100 * (v - min) / (max - min)).toFixed(1);
+        return `
+          <div class="absolute top-0 h-full" style="left: ${left}%;">
+            <div class="w-0.5 h-full" style="background: ${color};"></div>
+            <div class="absolute -top-6 -translate-x-1/2 text-xs font-medium whitespace-nowrap" style="color: ${color};">
+              ${label === 'limit' ? '' : label + ' '}${label === 'limit' ? '' : v.toFixed(1)}
+            </div>
+          </div>`;
+      }).join('');
+      document.getElementById('pct-min').textContent = min + ' mph';
+      document.getElementById('pct-max').textContent = max + ' mph';
+    }
+
     function renderDirectionChart() {
-      const ctx = document.getElementById('directionChart');
       const inbound = data.filter(d => d.direction === 'inbound_or_toward').length;
       const outbound = data.length - inbound;
-
-      new Chart(ctx, {
+      new Chart(document.getElementById('directionChart'), {
         type: 'doughnut',
         data: {
           labels: ['Inbound (toward)', 'Outbound (away)'],
@@ -157,15 +277,14 @@
     }
 
     function renderRecentTable() {
-      const recent = [...data].sort((a, b) => new Date(b.observed_at) - new Date(a.observed_at)).slice(0, 12);
-      const html = recent.map(d => `
+      const recent = [...data].sort((a, b) => new Date(b.observed_at) - new Date(a.observed_at)).slice(0, 10);
+      document.getElementById('recent-table').innerHTML = recent.map(d => `
         <div class="flex justify-between py-1.5 border-b border-zinc-800 last:border-0 text-xs">
-          <div class="text-zinc-400">${new Date(d.observed_at).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit', second:'2-digit'})}</div>
-          <div class="font-mono">${d.speed_mph.toFixed(1)} mph</div>
+          <div class="text-zinc-400">${new Date(d.observed_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</div>
+          <div class="font-mono ${d.speed_mph > SPEED_LIMIT ? 'text-amber-400' : ''} ${d.speed_mph > ALERT_THRESHOLD ? 'text-red-400 font-semibold' : ''}">${d.speed_mph.toFixed(1)} mph</div>
           <div class="${d.direction === 'inbound_or_toward' ? 'text-blue-400' : 'text-yellow-400'}">${d.direction === 'inbound_or_toward' ? 'inbound' : 'outbound'}</div>
         </div>
       `).join('');
-      document.getElementById('recent-table').innerHTML = html;
     }
 
     loadData();
