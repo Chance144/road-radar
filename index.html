@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Road Radar • Live Inbound</title>
+  <title>Road Radar • Live</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
   <style>
@@ -12,6 +12,7 @@
     .stat-card:hover { transform: translateY(-1px); }
     .pulse { animation: pulse 2s infinite; }
     @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }
+    select { background: #18181b; border: 1px solid #3f3f46; border-radius: 0.5rem; padding: 0.3rem 0.6rem; font-size: 0.8rem; color: #d4d4d8; }
   </style>
 </head>
 <body class="bg-zinc-950 text-zinc-200">
@@ -20,7 +21,10 @@
     <div class="flex items-center justify-between mb-6">
       <div>
         <h1 class="text-3xl font-semibold tracking-tight">Road Radar</h1>
-        <p class="text-zinc-400 text-sm mt-1">Inbound traffic (uphill) • <span id="mode-label">connecting...</span></p>
+        <p class="text-zinc-400 text-sm mt-1">
+          <span id="location-badge" class="text-sky-400"></span>
+          <span id="mode-label" class="text-zinc-500">connecting...</span>
+        </p>
       </div>
       <div class="text-right text-sm">
         <div class="flex items-center justify-end gap-2">
@@ -31,10 +35,19 @@
       </div>
     </div>
 
+    <!-- Filter Bar -->
+    <div class="flex items-center gap-3 mb-6 text-sm">
+      <span class="text-zinc-500">Location:</span>
+      <select id="location-filter" onchange="renderAll()">
+        <option value="">All locations</option>
+      </select>
+      <span id="filter-count" class="text-zinc-500 text-xs"></span>
+    </div>
+
     <!-- Latest Speed Panel -->
     <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-8 mb-8 flex items-center justify-between">
       <div>
-        <div class="text-xs text-zinc-500 mb-1">Latest vehicle</div>
+        <div class="text-xs text-zinc-500 mb-1">Latest vehicle <span id="latest-dir" class="ml-2"></span></div>
         <div class="flex items-baseline gap-3">
           <span id="latest-speed" class="text-7xl font-bold tracking-tight">--</span>
           <span class="text-2xl text-zinc-400">mph</span>
@@ -51,23 +64,26 @@
     <!-- Stats -->
     <div id="stats" class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4 mb-8"></div>
 
-    <!-- Speed Distribution Histogram -->
+    <!-- Bidirectional Speed Distribution -->
     <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-6 mb-8">
       <div class="flex items-center justify-between mb-4">
         <div>
-          <div class="font-medium">Speed distribution</div>
-          <div class="text-xs text-zinc-500">2 mph bins • green under 30 • amber 30-35 • red over 35</div>
+          <div class="font-medium">Speed distribution by direction</div>
+          <div class="text-xs text-zinc-500">
+            <span class="text-blue-400">inbound (up)</span> vs
+            <span class="text-yellow-400">outbound (down)</span> • 2 mph bins
+          </div>
         </div>
       </div>
-      <div class="h-72">
+      <div class="h-80">
         <canvas id="histChart"></canvas>
       </div>
     </div>
 
     <!-- Percentile Strip -->
     <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-6 mb-8">
-      <div class="font-medium mb-1">Percentiles</div>
-      <div class="text-xs text-zinc-500 mb-5">Where inbound drivers actually fall on the speed range</div>
+      <div class="font-medium mb-1">Inbound percentiles</div>
+      <div class="text-xs text-zinc-500 mb-5">Where uphill drivers actually fall on the speed range</div>
       <div class="relative h-10 rounded-lg overflow-visible">
         <div class="absolute inset-0 rounded-lg" style="background: linear-gradient(90deg, #059669 0%, #059669 55%, #d97706 70%, #dc2626 100%);"></div>
         <div id="pct-markers"></div>
@@ -81,12 +97,12 @@
 
     <!-- Recent Events -->
     <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-6">
-      <div class="font-medium mb-4">Latest inbound events</div>
+      <div class="font-medium mb-4">Latest events</div>
       <div id="recent-table" class="text-sm"></div>
     </div>
 
     <div class="mt-8 text-xs text-zinc-500 text-center">
-      OmniPreSense OPS243-C-FC-RP • Pi Zero 2 • 9° cosine correction • inbound only
+      OmniPreSense OPS243-C-FC-RP • Pi Zero 2 • 9° cosine correction
     </div>
   </div>
 
@@ -94,30 +110,56 @@
     const SPEED_LIMIT = 30;
     const ALERT_THRESHOLD = 35;
     const POLL_MS = 5000;
+    const LOCATION_MAP = {
+      'NETGEAR78': 'Home',
+      'Perkins Network': "Parents' house",
+      'GL-AXT1800-ea2': 'Travel router',
+    };
     let data = [];
     let histChart = null;
     let liveMode = false;
 
+    function locationLabel(ssid) {
+      if (!ssid) return 'Unknown';
+      return LOCATION_MAP[ssid] || ssid;
+    }
+
+    async function fetchStatus() {
+      try {
+        const res = await fetch('/api/status', { cache: 'no-store' });
+        if (res.ok) return await res.json();
+      } catch (e) { /* static mode */ }
+      return null;
+    }
+
     async function fetchEvents() {
-      // Live mode: same-origin API (served by the Pi Zero).
-      // Static mode: radar_data.json next to this page (GitHub Pages).
       try {
         const res = await fetch('/api/events', { cache: 'no-store' });
-        if (res.ok) {
-          liveMode = true;
-          return await res.json();
-        }
-      } catch (e) { /* fall through to static */ }
+        if (res.ok) { liveMode = true; return await res.json(); }
+      } catch (e) { /* fall through */ }
       liveMode = false;
       const res = await fetch('radar_data.json', { cache: 'no-store' });
-      const all = await res.json();
-      return all.filter(e => e.direction === 'inbound_or_toward');
+      return await res.json();
+    }
+
+    function filteredData() {
+      const loc = document.getElementById('location-filter').value;
+      if (!loc) return data;
+      return data.filter(e => (e.network || 'NETGEAR78') === loc);
     }
 
     async function refresh() {
       try {
-        data = await fetchEvents();
+        const [events, status] = await Promise.all([fetchEvents(), fetchStatus()]);
+        data = events;
+        buildLocationFilter();
         renderAll();
+        const badge = document.getElementById('location-badge');
+        if (status && status.ssid) {
+          badge.textContent = '📍 ' + (status.location || status.ssid) + ' (' + status.ssid + ') • ';
+        } else if (!liveMode) {
+          badge.textContent = '';
+        }
         const now = new Date();
         document.getElementById('last-refresh').textContent =
           'updated ' + now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
@@ -138,6 +180,19 @@
       }
     }
 
+    function buildLocationFilter() {
+      const sel = document.getElementById('location-filter');
+      const current = sel.value;
+      const networks = [...new Set(data.map(e => e.network || 'NETGEAR78'))].sort();
+      const opts = ['<option value="">All locations</option>']
+        .concat(networks.map(n => `<option value="${n}">${locationLabel(n)}</option>`));
+      const html = opts.join('');
+      if (sel.innerHTML !== html) {
+        sel.innerHTML = html;
+        sel.value = current;
+      }
+    }
+
     function percentile(sorted, p) {
       if (!sorted.length) return 0;
       const r = (p / 100) * (sorted.length - 1);
@@ -146,26 +201,31 @@
       return sorted[lo] + (sorted[hi] - sorted[lo]) * (r - lo);
     }
 
-    function sortedSpeeds() {
-      return data.map(d => d.speed_mph).sort((a, b) => a - b);
-    }
-
     function renderAll() {
-      renderLatest();
-      renderStats();
-      renderHistogram();
-      renderPercentileStrip();
-      renderRecentTable();
+      const d = filteredData();
+      const inbound = d.filter(e => e.direction === 'inbound_or_toward');
+      const outbound = d.filter(e => e.direction !== 'inbound_or_toward');
+      document.getElementById('filter-count').textContent =
+        d.length + ' events (' + inbound.length + ' in / ' + outbound.length + ' out)';
+      renderLatest(d);
+      renderStats(inbound, outbound);
+      renderHistogram(inbound, outbound);
+      renderPercentileStrip(inbound);
+      renderRecentTable(d);
     }
 
-    function renderLatest() {
-      if (!data.length) return;
-      const latest = data[data.length - 1];
+    function renderLatest(d) {
+      if (!d.length) return;
+      const latest = d[d.length - 1];
       const speed = latest.speed_mph;
       const el = document.getElementById('latest-speed');
       el.textContent = speed.toFixed(1);
       el.className = 'text-7xl font-bold tracking-tight ' +
         (speed > ALERT_THRESHOLD ? 'text-red-400' : speed > SPEED_LIMIT ? 'text-amber-400' : 'text-emerald-400');
+      const dirEl = document.getElementById('latest-dir');
+      const isIn = latest.direction === 'inbound_or_toward';
+      dirEl.textContent = isIn ? 'inbound' : 'outbound';
+      dirEl.className = 'ml-2 text-xs px-2 py-0.5 rounded-full ' + (isIn ? 'bg-blue-900 text-blue-300' : 'bg-yellow-900 text-yellow-300');
       const t = new Date(latest.observed_at);
       const agoSec = Math.round((Date.now() - t.getTime()) / 1000);
       const ago = agoSec < 90 ? agoSec + 's ago' : Math.round(agoSec / 60) + 'm ago';
@@ -177,24 +237,20 @@
       deltaEl.className = 'text-sm mt-2 ' + (delta > 0 ? 'text-amber-400' : 'text-emerald-400');
     }
 
-    function renderStats() {
-      const speeds = sortedSpeeds();
-      if (!speeds.length) return;
-      const n = speeds.length;
-      const mean = speeds.reduce((a, b) => a + b, 0) / n;
-      const p50 = percentile(speeds, 50);
-      const p85 = percentile(speeds, 85);
-      const max = speeds[n - 1];
-      const overLimit = speeds.filter(s => s > SPEED_LIMIT).length;
-      const pctOver = (100 * overLimit / n).toFixed(0);
-      const cards = [
-        ['Inbound events', n, ''],
-        ['85th percentile', p85.toFixed(1), 'mph'],
-        ['Average', mean.toFixed(1), 'mph'],
-        ['Median', p50.toFixed(1), 'mph'],
-        ['Max', max.toFixed(1), 'mph'],
-        ['Over ' + SPEED_LIMIT + ' mph', pctOver + '%', overLimit + ' of ' + n],
-      ];
+    function renderStats(inbound, outbound) {
+      const speeds = inbound.map(e => e.speed_mph).sort((a, b) => a - b);
+      const cards = [['Inbound', inbound.length, ''], ['Outbound', outbound.length, '']];
+      if (speeds.length) {
+        const n = speeds.length;
+        const mean = speeds.reduce((a, b) => a + b, 0) / n;
+        const over = speeds.filter(s => s > SPEED_LIMIT).length;
+        cards.push(
+          ['85th %ile in', percentile(speeds, 85).toFixed(1), 'mph'],
+          ['Average in', mean.toFixed(1), 'mph'],
+          ['Max in', speeds[n - 1].toFixed(1), 'mph'],
+          ['Over ' + SPEED_LIMIT + ' in', (100 * over / n).toFixed(0) + '%', over + ' of ' + n],
+        );
+      }
       document.getElementById('stats').innerHTML = cards.map(([label, val, sub]) => `
         <div class="stat-card bg-zinc-900 border border-zinc-800 rounded-2xl p-5">
           <div class="text-xs text-zinc-500">${label}</div>
@@ -203,33 +259,21 @@
       `).join('');
     }
 
-    function buildBins() {
-      const speeds = sortedSpeeds();
+    function renderHistogram(inbound, outbound) {
+      const all = inbound.concat(outbound);
+      if (!all.length) return;
+      const speeds = all.map(e => e.speed_mph);
       const BIN = 2;
-      const lo = Math.floor(speeds[0] / BIN) * BIN;
-      const hi = Math.ceil(speeds[speeds.length - 1] / BIN) * BIN;
+      const lo = Math.floor(Math.min(...speeds) / BIN) * BIN;
+      const hi = Math.ceil(Math.max(...speeds) / BIN) * BIN;
       const bins = [];
-      for (let start = lo; start < hi; start += BIN) bins.push({ start, end: start + BIN, count: 0 });
-      for (const s of speeds) {
-        const i = Math.min(Math.floor((s - lo) / BIN), bins.length - 1);
-        bins[i].count++;
-      }
-      return bins;
-    }
+      for (let start = lo; start < hi; start += BIN) bins.push({ start, in: 0, out: 0 });
+      const idx = s => Math.min(Math.floor((s - lo) / BIN), bins.length - 1);
+      inbound.forEach(e => bins[idx(e.speed_mph)].in++);
+      outbound.forEach(e => bins[idx(e.speed_mph)].out++);
 
-    function binColor(start) {
-      if (start >= ALERT_THRESHOLD) return '#dc2626';
-      if (start >= SPEED_LIMIT) return '#d97706';
-      return '#059669';
-    }
-
-    function renderHistogram() {
-      const speeds = sortedSpeeds();
-      if (!speeds.length) return;
-      const bins = buildBins();
-      const lo = bins[0].start;
-      const hi = bins[bins.length - 1].end;
-      const p85 = percentile(speeds, 85);
+      const inSpeeds = inbound.map(e => e.speed_mph).sort((a, b) => a - b);
+      const p85 = inSpeeds.length ? percentile(inSpeeds, 85) : null;
 
       const markers = {
         id: 'markers',
@@ -254,7 +298,7 @@
             ctx.restore();
           };
           draw(SPEED_LIMIT, '#f87171', 'limit ' + SPEED_LIMIT);
-          draw(p85, '#60a5fa', 'p85 ' + p85.toFixed(1));
+          if (p85) draw(p85, '#60a5fa', 'p85in ' + p85.toFixed(1));
         }
       };
 
@@ -262,12 +306,11 @@
       histChart = new Chart(document.getElementById('histChart'), {
         type: 'bar',
         data: {
-          labels: bins.map(b => b.start + '-' + b.end),
-          datasets: [{
-            data: bins.map(b => b.count),
-            backgroundColor: bins.map(b => binColor(b.start)),
-            borderRadius: 4,
-          }]
+          labels: bins.map(b => b.start + '-' + (b.start + BIN)),
+          datasets: [
+            { label: 'Inbound', data: bins.map(b => b.in), backgroundColor: '#3b82f6', borderRadius: 4 },
+            { label: 'Outbound', data: bins.map(b => -b.out), backgroundColor: '#eab308', borderRadius: 4 },
+          ]
         },
         options: {
           responsive: true,
@@ -276,16 +319,23 @@
           animation: false,
           scales: {
             x: { grid: { display: false }, ticks: { color: '#666' }, title: { display: true, text: 'mph', color: '#666' } },
-            y: { grid: { color: '#27251f' }, ticks: { color: '#666', stepSize: 1 }, beginAtZero: true, title: { display: true, text: 'vehicles', color: '#666' } }
+            y: {
+              grid: { color: '#27251f' },
+              ticks: { color: '#666', callback: v => Math.abs(v) },
+              title: { display: true, text: 'vehicles', color: '#666' }
+            }
           },
-          plugins: { legend: { display: false } }
+          plugins: {
+            legend: { labels: { color: '#999' } },
+            tooltip: { callbacks: { label: c => ' ' + c.dataset.label + ': ' + Math.abs(c.parsed.y) } }
+          }
         },
         plugins: [markers]
       });
     }
 
-    function renderPercentileStrip() {
-      const speeds = sortedSpeeds();
+    function renderPercentileStrip(inbound) {
+      const speeds = inbound.map(e => e.speed_mph).sort((a, b) => a - b);
       if (!speeds.length) return;
       const min = Math.floor(speeds[0]);
       const max = Math.ceil(speeds[speeds.length - 1]);
@@ -306,14 +356,18 @@
       document.getElementById('pct-max').textContent = max + ' mph';
     }
 
-    function renderRecentTable() {
-      const recent = [...data].sort((a, b) => new Date(b.observed_at) - new Date(a.observed_at)).slice(0, 10);
-      document.getElementById('recent-table').innerHTML = recent.map(d => `
+    function renderRecentTable(d) {
+      const recent = [...d].sort((a, b) => new Date(b.observed_at) - new Date(a.observed_at)).slice(0, 12);
+      document.getElementById('recent-table').innerHTML = recent.map(e => {
+        const isIn = e.direction === 'inbound_or_toward';
+        const loc = e.network ? ' <span class="text-zinc-600">• ' + locationLabel(e.network) + '</span>' : '';
+        return `
         <div class="flex justify-between py-1.5 border-b border-zinc-800 last:border-0 text-xs">
-          <div class="text-zinc-400">${new Date(d.observed_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</div>
-          <div class="font-mono ${d.speed_mph > ALERT_THRESHOLD ? 'text-red-400 font-semibold' : d.speed_mph > SPEED_LIMIT ? 'text-amber-400' : ''}">${d.speed_mph.toFixed(1)} mph</div>
-        </div>
-      `).join('') || '<div class="text-zinc-500 text-xs">no inbound events yet</div>';
+          <div class="text-zinc-400">${new Date(e.observed_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}${loc}</div>
+          <div class="font-mono ${e.speed_mph > ALERT_THRESHOLD ? 'text-red-400 font-semibold' : e.speed_mph > SPEED_LIMIT ? 'text-amber-400' : ''}">${e.speed_mph.toFixed(1)} mph</div>
+          <div class="${isIn ? 'text-blue-400' : 'text-yellow-400'}">${isIn ? 'inbound' : 'outbound'}</div>
+        </div>`;
+      }).join('') || '<div class="text-zinc-500 text-xs">no events yet</div>';
     }
 
     refresh();
