@@ -56,7 +56,7 @@
       </div>
       <div class="text-right">
         <div class="text-xs text-zinc-500 mb-1">Speed limit</div>
-        <div class="text-4xl font-semibold text-zinc-400">30</div>
+        <div id="speed-limit-display" class="text-4xl font-semibold text-zinc-400">30</div>
         <div id="latest-delta" class="text-sm mt-2"></div>
       </div>
     </div>
@@ -90,7 +90,7 @@
       </div>
       <div class="flex justify-between text-xs text-zinc-500 mt-2">
         <span id="pct-min">-</span>
-        <span>speed limit 30 mph</span>
+        <span id="pct-limit-label">speed limit 30 mph</span>
         <span id="pct-max">-</span>
       </div>
     </div>
@@ -102,7 +102,7 @@
     </div>
 
     <div class="mt-8 text-xs text-zinc-500 text-center">
-      OmniPreSense OPS243-C-FC-RP • Pi Zero 2 • 9° cosine correction
+      OmniPreSense OPS243-C-FC-RP • Pi Zero 2 • 11° cosine correction
     </div>
   </div>
 
@@ -210,6 +210,8 @@
 
     function renderAll() {
       const d = filteredData();
+      document.getElementById('speed-limit-display').textContent = SPEED_LIMIT;
+      document.getElementById('pct-limit-label').textContent = 'speed limit ' + SPEED_LIMIT + ' mph';
       const inbound = d.filter(e => e.direction === 'inbound_or_toward');
       const outbound = d.filter(e => e.direction !== 'inbound_or_toward');
       document.getElementById('filter-count').textContent =
