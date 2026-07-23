@@ -36,10 +36,16 @@
     </div>
 
     <!-- Filter Bar -->
-    <div class="flex items-center gap-3 mb-6 text-sm">
+    <div class="flex items-center gap-3 mb-6 text-sm flex-wrap">
       <span class="text-zinc-500">Location:</span>
-      <select id="location-filter" onchange="userTouchedFilter = true; renderAll()">
-        <option value="">All locations</option>
+      <select id="location-filter" onchange="userTouchedFilter = true; renderAll()"></select>
+      <span class="text-zinc-500 ml-3">Time:</span>
+      <select id="time-filter" onchange="renderAll()">
+        <option value="1800">Last 30 min</option>
+        <option value="3600">Last hour</option>
+        <option value="10800">Last 3 hours</option>
+        <option value="today" selected>Today</option>
+        <option value="">All time</option>
       </select>
       <span id="filter-count" class="text-zinc-500 text-xs"></span>
     </div>
@@ -146,8 +152,18 @@
 
     function filteredData() {
       const loc = document.getElementById('location-filter').value;
-      if (!loc) return data;
-      return data.filter(e => (e.network || 'NETGEAR78') === loc);
+      const tf = document.getElementById('time-filter').value;
+      let d = data;
+      if (loc) d = d.filter(e => (e.network || 'NETGEAR78') === loc);
+      if (tf === 'today') {
+        const now = new Date();
+        const start = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+        d = d.filter(e => new Date(e.observed_at).getTime() >= start);
+      } else if (tf) {
+        const cutoff = Date.now() - parseInt(tf, 10) * 1000;
+        d = d.filter(e => new Date(e.observed_at).getTime() >= cutoff);
+      }
+      return d;
     }
 
     async function refresh() {
@@ -186,17 +202,16 @@
 
     function buildLocationFilter() {
       const sel = document.getElementById('location-filter');
+      // Locations stay strictly separate — one location at a time, no combined view.
       const networks = [...new Set(data.map(e => e.network || 'NETGEAR78'))];
       if (currentSsid && !networks.includes(currentSsid)) networks.push(currentSsid);
       networks.sort();
-      const opts = ['<option value="">All locations</option>']
-        .concat(networks.map(n => `<option value="${n}">${locationLabel(n)}</option>`));
-      const html = opts.join('');
+      const html = networks.map(n => `<option value="${n}">${locationLabel(n)}</option>`).join('');
       if (sel.innerHTML !== html) sel.innerHTML = html;
-      // Default view follows the Pi's current location until the user picks a filter manually.
+      // Default view follows the Pi's current location until the user picks manually.
       if (!userTouchedFilter) {
-        sel.value = currentSsid || '';
-        if (sel.value !== (currentSsid || '')) sel.value = '';
+        sel.value = currentSsid || networks[0] || '';
+        if (!sel.value && networks.length) sel.value = networks[0];
       }
     }
 
@@ -224,7 +239,13 @@
     }
 
     function renderLatest(d) {
-      if (!d.length) return;
+      if (!d.length) {
+        document.getElementById('latest-speed').textContent = '--';
+        document.getElementById('latest-meta').textContent = 'no events in this window';
+        document.getElementById('latest-dir').textContent = '';
+        document.getElementById('latest-delta').textContent = '';
+        return;
+      }
       const latest = d[d.length - 1];
       const speed = latest.speed_mph;
       const el = document.getElementById('latest-speed');
@@ -270,7 +291,10 @@
 
     function renderHistogram(inbound, outbound) {
       const all = inbound.concat(outbound);
-      if (!all.length) return;
+      if (!all.length) {
+        if (histChart) { histChart.destroy(); histChart = null; }
+        return;
+      }
       const speeds = all.map(e => e.speed_mph);
       const BIN = 2;
       const lo = Math.floor(Math.min(...speeds) / BIN) * BIN;
@@ -345,7 +369,10 @@
 
     function renderPercentileStrip(inbound) {
       const speeds = inbound.map(e => e.speed_mph).sort((a, b) => a - b);
-      if (!speeds.length) return;
+      if (!speeds.length) {
+        document.getElementById('pct-markers').innerHTML = '';
+        return;
+      }
       const min = Math.floor(speeds[0]);
       const max = Math.ceil(speeds[speeds.length - 1]);
       const marks = [
