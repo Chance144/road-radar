@@ -47,6 +47,10 @@
         <option value="today" selected>Today</option>
         <option value="">All time</option>
       </select>
+      <span class="text-zinc-500 ml-3">Day:</span>
+      <select id="date-filter" onchange="onDateChange()">
+        <option value="">All days</option>
+      </select>
       <span id="filter-count" class="text-zinc-500 text-xs"></span>
     </div>
 
@@ -150,11 +154,33 @@
       return await res.json();
     }
 
+    function dayKey(ts) {
+      // Local-time YYYY-MM-DD for grouping events by calendar day
+      const dt = new Date(ts);
+      return dt.getFullYear() + '-' + String(dt.getMonth() + 1).padStart(2, '0') + '-' + String(dt.getDate()).padStart(2, '0');
+    }
+
+    function dayLabel(key) {
+      const [y, m, d] = key.split('-').map(Number);
+      return new Date(y, m - 1, d).toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' });
+    }
+
+    function onDateChange() {
+      const day = document.getElementById('date-filter').value;
+      const tf = document.getElementById('time-filter');
+      // A picked day is the whole day — the time window filter doesn't apply
+      tf.disabled = !!day;
+      tf.style.opacity = day ? '0.4' : '1';
+      renderAll();
+    }
+
     function filteredData() {
       const loc = document.getElementById('location-filter').value;
+      const day = document.getElementById('date-filter').value;
       const tf = document.getElementById('time-filter').value;
       let d = data;
       if (loc) d = d.filter(e => (e.network || 'NETGEAR78') === loc);
+      if (day) return d.filter(e => dayKey(e.observed_at) === day);
       if (tf === 'today') {
         const now = new Date();
         const start = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
@@ -173,6 +199,7 @@
         currentSsid = (status && status.ssid) ? status.ssid : null;
         if (status && status.speed_limit) SPEED_LIMIT = status.speed_limit;
         buildLocationFilter();
+        buildDateFilter();
         renderAll();
         const badge = document.getElementById('location-badge');
         if (status && status.ssid) {
@@ -198,6 +225,17 @@
       } catch (e) {
         document.getElementById('live-label').textContent = 'error';
       }
+    }
+
+    function buildDateFilter() {
+      const sel = document.getElementById('date-filter');
+      const prev = sel.value;
+      const days = [...new Set(data.map(e => dayKey(e.observed_at)))].sort().reverse();
+      const html = '<option value="">All days</option>' +
+        days.map(k => `<option value="${k}">${dayLabel(k)}</option>`).join('');
+      if (sel.innerHTML !== html) sel.innerHTML = html;
+      // Restore selection if that day still exists in the data
+      if (prev && days.includes(prev)) sel.value = prev;
     }
 
     function buildLocationFilter() {
